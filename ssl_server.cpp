@@ -7,9 +7,21 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <resolv.h>
-#include "openssl/ssl.h"
-#include "openssl/err.h"
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
+#include <mutex>
+#include <vector>
+#include <thread>
+
 #define FAIL    -1
+
+using namespace std;
+
+bool broadcast;
+vector<SSL*> connected_ssl;
+mutex m;
+
 // Create the SSL socket and intialize the socket address structure
 int OpenListener(int port)
 {
@@ -49,7 +61,7 @@ SSL_CTX* InitServerCTX(void)
     SSL_CTX *ctx;
     OpenSSL_add_all_algorithms();  /* load & register all cryptos, etc. */
     SSL_load_error_strings();   /* load all error messages */
-    method = TLSv1_2_server_method();  /* create new server-method instance */
+    method = (ssl_method_st*)TLSv1_2_server_method();  /* create new server-method instance */
     ctx = SSL_CTX_new(method);   /* create new context from method */
     if ( ctx == NULL )
     {
@@ -102,43 +114,60 @@ void Servlet(SSL* ssl) /* Serve the connection -- threadable */
 {
     char buf[1024] = {0};
     int sd, bytes;
-    const char* ServerResponse="<\Body>\
-                               <Name>aticleworld.com</Name>\
-                 <year>1.5</year>\
-                 <BlogType>Embedede and c\c++<\BlogType>\
-                 <Author>amlendra<Author>\
-                 <\Body>";
-    const char *cpValidMessage = "<Body>\
-                               <UserName>aticle<UserName>\
-                 <Password>123<Password>\
-                 <\Body>";
+
     if ( SSL_accept(ssl) == FAIL )     /* do SSL-protocol accept */
         ERR_print_errors_fp(stderr);
     else
     {
-        ShowCerts(ssl);        /* get any certificates */
-        bytes = SSL_read(ssl, buf, sizeof(buf)); /* get request */
-        buf[bytes] = '\0';
-        printf("Client msg: \"%s\"\n", buf);
-        if ( bytes > 0 )
-        {
-            if(strcmp(cpValidMessage,buf) == 0)
-            {
-                SSL_write(ssl, ServerResponse, strlen(ServerResponse)); /* send reply */
-            }
-            else
-            {
-                SSL_write(ssl, "Invalid Message", strlen("Invalid Message")); /* send reply */
-            }
-        }
-        else
-        {
-            ERR_print_errors_fp(stderr);
-        }
+	    if(broadcast){
+	    	m.lock();
+	    	connected_ssl.push_back(ssl);
+	    	m.unlock();
+	    }
+        //ShowCerts(ssl);        /* get any certificates */
+        while(true){
+	        bytes = SSL_read(ssl, buf, sizeof(buf)); /* get request */
+	        buf[bytes] = '\0';
+	        printf("Client msg: \"%s\"\n", buf);
+	        if ( bytes > 0 )
+	        {
+	        	if(broadcast){
+	        		m.lock();
+	        		for(vector<SSL*>::iterator it = connected_ssl.begin();
+	        			it != connected_ssl.end();
+	        			it++)
+	        		{
+	        			SSL_write(*it, buf, bytes); /* send reply */
+	        		}
+	        		m.unlock();
+	        	}
+	        	else
+	            	SSL_write(ssl, buf, bytes); /* send reply */
+	        }
+	        else
+	        {
+	            ERR_print_errors_fp(stderr);
+	            break;
+	        }
+    	}
     }
     sd = SSL_get_fd(ssl);       /* get socket connection */
     SSL_free(ssl);         /* release SSL state */
     close(sd);          /* close connection */
+
+    if(broadcast){
+    	m.lock();
+    	for(vector<SSL*>::iterator it = connected_ssl.begin();
+    		it != connected_ssl.end();
+    		it++)
+    	{
+    		if(*it == ssl){
+    			connected_ssl.erase(it);
+    			break;
+    		}
+    	}
+    	m.unlock();
+    }
 }
 int main(int count, char *Argc[])
 {
@@ -157,7 +186,8 @@ int main(int count, char *Argc[])
         exit(0);
     }
 
-    
+    broadcast = false;
+    if(count == 3 && !strcmp(Argc[2], "-b")) broadcast = true;
 
     // Initialize the SSL library
     SSL_library_init();
@@ -174,7 +204,8 @@ int main(int count, char *Argc[])
         printf("Connection: %s:%d\n",inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
         ssl = SSL_new(ctx);              /* get new SSL state with context */
         SSL_set_fd(ssl, client);      /* set connection socket to SSL state */
-        Servlet(ssl);         /* service connection */
+        thread session_thread(Servlet, ssl);	/* service connection */
+        session_thread.detach();
     }
     close(server);          /* close server socket */
     SSL_CTX_free(ctx);         /* release context */

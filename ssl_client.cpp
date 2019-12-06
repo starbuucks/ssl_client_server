@@ -8,6 +8,11 @@
 #include <netdb.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+
+#include <thread>
+
+using namespace std;
+
 #define FAIL    -1
 int OpenConnection(const char *hostname, int port)
 {
@@ -38,7 +43,7 @@ SSL_CTX* InitCTX(void)
     SSL_CTX *ctx;
     OpenSSL_add_all_algorithms();  /* Load cryptos, et.al. */
     SSL_load_error_strings();   /* Bring in and register error messages */
-    method = TLSv1_2_client_method();  /* Create new client-method instance */
+    method = (ssl_method_st*)TLSv1_2_client_method();  /* Create new client-method instance */
     ctx = SSL_CTX_new(method);   /* Create new context */
     if ( ctx == NULL )
     {
@@ -66,6 +71,22 @@ void ShowCerts(SSL* ssl)
     else
         printf("Info: No client certificates configured.\n");
 }
+
+void get_and_print(SSL* ssl){
+    const static int BUFSIZE = 1024;
+    char buf[BUFSIZE];
+
+    while(true){
+        ssize_t received = SSL_read(ssl, buf, BUFSIZE - 1);
+        if (received == 0 || received == -1) {
+            perror("recv failed");
+            exit(0);
+        }
+        buf[received] = '\0';
+        printf("REceived: %s\n", buf);
+    }
+}
+
 int main(int count, char *strings[])
 {
     SSL_CTX *ctx;
@@ -91,23 +112,17 @@ int main(int count, char *strings[])
         ERR_print_errors_fp(stderr);
     else
     {
-        char acUsername[16] = {0};
-        char acPassword[16] = {0};
-        const char *cpRequestMessage = "<Body>\
-                               <UserName>%s<UserName>\
-                 <Password>%s<Password>\
-                 <\Body>";
-        printf("Enter the User Name : ");
-        scanf("%s",acUsername);
-        printf("\n\nEnter the Password : ");
-        scanf("%s",acPassword);
-        sprintf(acClientRequest, cpRequestMessage, acUsername,acPassword);   /* construct reply */
         printf("\n\nConnected with %s encryption\n", SSL_get_cipher(ssl));
         ShowCerts(ssl);        /* get any certs */
-        SSL_write(ssl,acClientRequest, strlen(acClientRequest));   /* encrypt & send message */
-        bytes = SSL_read(ssl, buf, sizeof(buf)); /* get reply & decrypt */
-        buf[bytes] = 0;
-        printf("Received: \"%s\"\n", buf);
+
+        thread print_thread(get_and_print, ssl);
+        print_thread.detach();
+
+        while(true){
+            bytes = read(0, buf, 1024);
+            buf[bytes-1] = '\0';
+            SSL_write(ssl,buf, strlen(buf));   /* encrypt & send message */
+        }
         SSL_free(ssl);        /* release connection state */
     }
     close(server);         /* close socket */
